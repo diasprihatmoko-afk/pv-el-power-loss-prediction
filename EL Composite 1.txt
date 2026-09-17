@@ -1,0 +1,345 @@
+"""
+================================================================================
+  EL DATASET ANALYSIS — ADD-ON PART 2: CI, TEMPORAL VALIDATION, MORPHOLOGY
+  File   : el_204panels_addon_part2.py
+  Purpose: Answers the three remaining reviewer requests:
+             15. Bootstrap / repeated-CV confidence intervals for R2, and a
+                 PAIRED test of whether EL_composite genuinely beats
+                 Crack_count_only (R1#7 / R2#6)
+             16. Grouped / temporal validation — held-out split by inspection
+                 date instead of random folds, to check whether the random
+                 5-fold R2 = 0.92 is optimistic (R2#2)
+             17. Morphology-aware ablation using the 126 crack-type labels:
+                 count-only vs morphology-aware vs edge-damage vs area-based
+                 features (R2#7)
+
+  Run this AFTER el_204panels_addon_validation_REVISED.py (same INPUT_CSV).
+
+  ────────────────────────────────────────────────────────────────────────
+  BEFORE RUNNING — CHECK / EDIT THESE THREE SETTINGS:
+
+    1. INPUT_CSV / OUTPUT_DIR   — same as your other scripts.
+    2. DATE_COL                 — set to the exact column name that holds
+       each panel's inspection date (e.g. 'Inspection_Date', 'Date').
+       If you are not sure, run this script once: it will print all column
+       names and try to auto-detect a date-like column.
+    3. CRACK_TYPE_COL           — set to the exact column name that holds
+       the categorical crack-type / morphology label (126 distinct values
+       per the manuscript). Same auto-detection fallback applies.
+
+  If DATE_COL or CRACK_TYPE_COL cannot be found/guessed, Section 16 or 17
+  will print a clear message and skip gracefully rather than crashing, so
+  you can still get the other results and fix the column name afterwards.
+  ────────────────────────────────────────────────────────────────────────
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from datetime import datetime
+from scipy import stats
+from sklearn.model_selection import KFold, cross_val_score, cross_val_predict
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_absolute_error
+import warnings
+warnings.filterwarnings('ignore')
+
+RANDOM_STATE = 42
+
+# ── ► EDIT THESE ◄ ──────────────────────────────────────────────────────────
+INPUT_CSV  = Path('/content/drive/MyDrive/PV ARRAY JST FARM/Dataset_el_204panels Seraphin.csv')
+OUTPUT_DIR = Path('/content/drive/MyDrive/PV ARRAY JST FARM/EL_Analysis_Output')
+
+DATE_COL        = None   # e.g. 'Inspection_Date'  — set this once you know it
+CRACK_TYPE_COL  = None   # e.g. 'Crack_Type'        — set this once you know it
+# ─────────────────────────────────────────────────────────────────────────────
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PLOT_DIR = OUTPUT_DIR / 'plots'
+PLOT_DIR.mkdir(parents=True, exist_ok=True)
+TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+N_BOOTSTRAP   = 1000   # bootstrap replicates for CI
+N_CV_REPEATS  = 20     # repeated 5-fold CV runs for the paired comparison
+TOP_N_WORST   = 20
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0. LOAD (identical derived columns to the other scripts)
+# ─────────────────────────────────────────────────────────────────────────────
+def load_and_prepare(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df['Actual_Power_pct'] = df['Actual_Power'] / df['Rated_Power'] * 100
+    df['Crack_Density']    = df['Num_Cracks'] / (156.0 * 156.0)
+    return df
+
+
+def _auto_detect_column(df: pd.DataFrame, keywords: list) -> str | None:
+    """Best-effort guess of a column name from a list of candidate keywords
+    (case-insensitive substring match)."""
+    for col in df.columns:
+        for kw in keywords:
+            if kw.lower() in col.lower():
+                return col
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 15. BOOTSTRAP CI + PAIRED REPEATED-CV COMPARISON  (R1#7 / R2#6)
+# ─────────────────────────────────────────────────────────────────────────────
+def section15_bootstrap_ci(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    print("=" * 78)
+    print("  SECTION 15 — Bootstrap CI & Paired Repeated-CV Comparison")
+    print("=" * 78)
+
+    y_full = df['Power_Loss'].values
+    n = len(df)
+
+    # ---- 15a. Bootstrap CI for key Pearson correlations -----------------------
+    print("\n  [15a] Bootstrap 95% CI for key Pearson correlations (2000 resamples)")
+    corr_targets = ['Num_Cracks', 'Edge_Damage', 'HotSpot_Area', 'Crack_Area']
+    rows_corr = []
+    rng = np.random.default_rng(RANDOM_STATE)
+    for col in corr_targets:
+        x_full = df[col].values
+        boot_r = np.empty(2000)
+        for b in range(2000):
+            idx = rng.integers(0, n, n)
+            boot_r[b] = np.corrcoef(x_full[idx], y_full[idx])[0, 1]
+        point_r = np.corrcoef(x_full, y_full)[0, 1]
+        lo, hi = np.percentile(boot_r, [2.5, 97.5])
+        rows_corr.append({'Predictor': col, 'Pearson_r': round(point_r, 4),
+                           'CI95_low': round(lo, 4), 'CI95_high': round(hi, 4)})
+    corr_ci_df = pd.DataFrame(rows_corr)
+    print(corr_ci_df.to_string(index=False))
+
+    # ---- 15b. Repeated 5-fold CV (20 repeats) -> distribution of R2 -----------
+    print(f"\n  [15b] Repeated 5-fold CV ({N_CV_REPEATS} repeats) — R2 distribution per feature set")
+    feature_sets = {
+        'Crack_count_only': ['Num_Cracks'],
+        'EL_composite'     : ['Num_Cracks', 'Crack_Area', 'HotSpot_Area', 'Edge_Damage'],
+    }
+    model = LinearRegression()  # the model where the reviewers' Delta R2=0.006 concern applies
+
+    per_repeat_r2 = {name: [] for name in feature_sets}
+    paired_diff = []   # EL_composite - Crack_count_only, same fold split each repeat
+
+    for rep in range(N_CV_REPEATS):
+        kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE + rep)
+        rep_scores = {}
+        for name, cols in feature_sets.items():
+            X = df[cols].values
+            scores = cross_val_score(model, X, y_full, cv=kf, scoring='r2')
+            rep_scores[name] = scores.mean()
+            per_repeat_r2[name].append(scores.mean())
+        paired_diff.append(rep_scores['EL_composite'] - rep_scores['Crack_count_only'])
+
+    rows_cv = []
+    for name, vals in per_repeat_r2.items():
+        vals = np.array(vals)
+        rows_cv.append({
+            'Feature_Set': name,
+            'Mean_R2': round(vals.mean(), 4),
+            'Std_R2': round(vals.std(), 4),
+            'CI95_low': round(np.percentile(vals, 2.5), 4),
+            'CI95_high': round(np.percentile(vals, 97.5), 4),
+        })
+    cv_ci_df = pd.DataFrame(rows_cv)
+    print(cv_ci_df.to_string(index=False))
+
+    # ---- 15c. Paired test: is EL_composite genuinely better than Crack_count_only? ----
+    paired_diff = np.array(paired_diff)
+    mean_diff = paired_diff.mean()
+    ci_low, ci_high = np.percentile(paired_diff, [2.5, 97.5])
+    t_stat, p_val = stats.ttest_1samp(paired_diff, 0.0)
+
+    print(f"\n  [15c] Paired comparison (EL_composite - Crack_count_only), "
+          f"{N_CV_REPEATS} repeats, same fold splits:")
+    print(f"        Mean Delta R2       : {mean_diff:.4f}")
+    print(f"        95% CI of Delta R2  : [{ci_low:.4f}, {ci_high:.4f}]")
+    print(f"        Paired t-test p     : {p_val:.4f}")
+    verdict = ("CI excludes 0 -> the small improvement is statistically distinguishable "
+                "from zero, but check whether it is PRACTICALLY meaningful given its size."
+                if ci_low > 0 or ci_high < 0 else
+                "CI includes 0 -> the improvement from adding crack area / hot-spot area / "
+                "edge damage on top of crack count alone is NOT statistically distinguishable "
+                "from zero at the 95% level. Recommended manuscript language: 'crack count alone "
+                "achieves comparable performance to the four-feature EL-composite (Delta R2 = "
+                f"{mean_diff:.4f}, 95% CI [{ci_low:.4f}, {ci_high:.4f}], not significant at alpha=0.05).'")
+    print(f"        Verdict: {verdict}\n")
+
+    corr_ci_df.to_csv(OUTPUT_DIR / f'bootstrap_correlation_CI_{TIMESTAMP}.csv', index=False)
+    cv_ci_df.to_csv(OUTPUT_DIR / f'repeated_cv_R2_CI_{TIMESTAMP}.csv', index=False)
+    pd.DataFrame({'repeat': range(N_CV_REPEATS), 'Delta_R2_ELcomposite_minus_CrackCountOnly': paired_diff}) \
+        .to_csv(OUTPUT_DIR / f'paired_delta_r2_{TIMESTAMP}.csv', index=False)
+    print(f"  Saved -> bootstrap_correlation_CI_{TIMESTAMP}.csv, repeated_cv_R2_CI_{TIMESTAMP}.csv, "
+          f"paired_delta_r2_{TIMESTAMP}.csv\n")
+
+    return corr_ci_df, cv_ci_df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 16. GROUPED / TEMPORAL VALIDATION  (R2#2)
+# ─────────────────────────────────────────────────────────────────────────────
+def section16_temporal_validation(df: pd.DataFrame, date_col: str | None) -> pd.DataFrame | None:
+    print("=" * 78)
+    print("  SECTION 16 — Grouped / Temporal Validation")
+    print("=" * 78)
+
+    if date_col is None:
+        date_col = _auto_detect_column(df, ['date', 'inspect', 'tanggal', 'time'])
+
+    if date_col is None or date_col not in df.columns:
+        print("\n  !! Could not find an inspection-date column.")
+        print("     Available columns in your dataset:")
+        print("    ", list(df.columns))
+        print("\n  ACTION NEEDED: set DATE_COL at the top of this script to the exact column")
+        print("  name holding each panel's inspection date, then re-run this section.")
+        print("  (The manuscript states inspection ran 31 March-20 May 2022, so such a column")
+        print("  should exist in the raw survey data even if it was dropped from this CSV.)\n")
+        return None
+
+    df = df.copy()
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    if df[date_col].isna().all():
+        print(f"\n  !! Column '{date_col}' exists but could not be parsed as dates. Skipping.\n")
+        return None
+
+    df = df.sort_values(date_col).reset_index(drop=True)
+    n = len(df)
+    split_idx = int(n * 0.8)
+    train, test = df.iloc[:split_idx], df.iloc[split_idx:]
+
+    print(f"\n  Inspection date range : {df[date_col].min().date()} to {df[date_col].max().date()}")
+    print(f"  Temporal split        : first {len(train)} panels (train) / last {len(test)} panels (test)")
+    print(f"  Train date range      : {train[date_col].min().date()} to {train[date_col].max().date()}")
+    print(f"  Test date range       : {test[date_col].min().date()} to {test[date_col].max().date()}\n")
+
+    feature_sets = {
+        'Crack_count_only': ['Num_Cracks'],
+        'EL_composite'     : ['Num_Cracks', 'Crack_Area', 'HotSpot_Area', 'Edge_Damage'],
+    }
+    models = {'LinearRegression': LinearRegression(),
+              'RandomForest': RandomForestRegressor(n_estimators=300, max_depth=5, random_state=RANDOM_STATE)}
+
+    rows = []
+    for feat_name, cols in feature_sets.items():
+        X_tr, y_tr = train[cols].values, train['Power_Loss'].values
+        X_te, y_te = test[cols].values, test['Power_Loss'].values
+        for model_name, model in models.items():
+            model.fit(X_tr, y_tr)
+            pred = model.predict(X_te)
+            rows.append({
+                'Feature_Set': feat_name,
+                'Model': model_name,
+                'Temporal_R2': round(r2_score(y_te, pred), 4),
+                'Temporal_MAE': round(mean_absolute_error(y_te, pred), 3),
+                'N_train': len(train), 'N_test': len(test),
+            })
+    result = pd.DataFrame(rows)
+    print(result.to_string(index=False))
+    print("\n  Compare Temporal_R2 above against the random-5-fold CV5_R2_mean reported earlier")
+    print("  (Crack_count_only ~0.917, EL_composite ~0.922). A markedly lower Temporal_R2 would")
+    print("  indicate the random-fold estimate was optimistic due to within-site homogeneity.\n")
+
+    result.to_csv(OUTPUT_DIR / f'temporal_validation_{TIMESTAMP}.csv', index=False)
+    print(f"  Saved -> temporal_validation_{TIMESTAMP}.csv\n")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 17. MORPHOLOGY-AWARE ABLATION  (R2#7)
+# ─────────────────────────────────────────────────────────────────────────────
+def section17_morphology_ablation(df: pd.DataFrame, crack_type_col: str | None,
+                                   top_k: int = 15) -> pd.DataFrame | None:
+    print("=" * 78)
+    print("  SECTION 17 — Morphology-Aware Ablation (crack-type labels)")
+    print("=" * 78)
+
+    if crack_type_col is None:
+        crack_type_col = _auto_detect_column(df, ['crack_type', 'morphology', 'crack_mode', 'type'])
+
+    if crack_type_col is None or crack_type_col not in df.columns:
+        print("\n  !! Could not find a crack-type / morphology column.")
+        print("     Available columns in your dataset:")
+        print("    ", list(df.columns))
+        print("\n  ACTION NEEDED: set CRACK_TYPE_COL at the top of this script to the exact")
+        print("  column name holding the categorical crack-type label (126 distinct values per")
+        print("  the manuscript), then re-run this section.\n")
+        return None
+
+    print(f"\n  Using column: '{crack_type_col}'")
+    vc = df[crack_type_col].value_counts()
+    print(f"  {vc.shape[0]} distinct crack-type labels found. Top {min(10, len(vc))} by frequency:")
+    print(vc.head(10).to_string())
+
+    # Group rare categories to keep the one-hot space manageable and avoid
+    # single-panel dummy columns that cannot generalise across folds.
+    top_types = vc.head(top_k).index
+    df = df.copy()
+    df['_crack_type_grouped'] = np.where(df[crack_type_col].isin(top_types),
+                                          df[crack_type_col], 'Other')
+    dummies = pd.get_dummies(df['_crack_type_grouped'], prefix='morph')
+    print(f"\n  Grouped into {dummies.shape[1]} morphology dummy features "
+          f"(top {top_k} types + 'Other').")
+
+    y = df['Power_Loss'].values
+    feature_sets = {
+        'Crack_count_only'         : df[['Num_Cracks']].values,
+        'Morphology_only'          : dummies.values,
+        'Crack_count_plus_morph'   : np.hstack([df[['Num_Cracks']].values, dummies.values]),
+        'EL_composite (count+area+hotspot+edge)':
+            df[['Num_Cracks', 'Crack_Area', 'HotSpot_Area', 'Edge_Damage']].values,
+    }
+
+    models = {'LinearRegression': LinearRegression(),
+              'RandomForest': RandomForestRegressor(n_estimators=300, max_depth=5, random_state=RANDOM_STATE)}
+    kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+    rows = []
+    for feat_name, X in feature_sets.items():
+        for model_name, model in models.items():
+            cv_r2 = cross_val_score(model, X, y, cv=kf, scoring='r2')
+            cv_mae = -cross_val_score(model, X, y, cv=kf, scoring='neg_mean_absolute_error')
+            rows.append({
+                'Feature_Set': feat_name, 'Model': model_name,
+                'N_features': X.shape[1],
+                'CV5_R2_mean': round(cv_r2.mean(), 4),
+                'CV5_R2_std': round(cv_r2.std(), 4),
+                'CV5_MAE_mean': round(cv_mae.mean(), 3),
+            })
+    result = pd.DataFrame(rows)
+    print("\n" + result.to_string(index=False))
+    print("\n  Interpretation guide:")
+    print("  - If 'Crack_count_plus_morph' clearly beats 'Crack_count_only', morphology carries")
+    print("    independent signal beyond raw count -> worth reporting as a positive ablation result.")
+    print("  - If 'Morphology_only' underperforms 'Crack_count_only', location/orientation alone")
+    print("    (without knowing HOW MANY cracks) is a weaker signal than simple count.")
+    print("  - Compare all four rows against the crack-count-only baseline already in Table 2.\n")
+
+    result.to_csv(OUTPUT_DIR / f'morphology_ablation_{TIMESTAMP}.csv', index=False)
+    print(f"  Saved -> morphology_ablation_{TIMESTAMP}.csv\n")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    df = load_and_prepare(INPUT_CSV)
+    print(f"Loaded {len(df)} panels. Columns available:\n  {list(df.columns)}\n")
+
+    corr_ci_df, cv_ci_df = section15_bootstrap_ci(df)
+    temporal_df = section16_temporal_validation(df, DATE_COL)
+    morph_df    = section17_morphology_ablation(df, CRACK_TYPE_COL)
+
+    print("=" * 78)
+    print("  ADD-ON PART 2 COMPLETE")
+    print("=" * 78)
+    return corr_ci_df, cv_ci_df, temporal_df, morph_df
+
+
+if __name__ == "__main__":
+    corr_ci_df, cv_ci_df, temporal_df, morph_df = main()

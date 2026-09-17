@@ -1,0 +1,427 @@
+"""
+================================================================================
+  EL DATASET ANALYSIS — ADD-ON: VALIDATION & SENSITIVITY MODULE (REVISED)
+  File   : el_204panels_addon_validation_REVISED.py
+  Purpose: Answers reviewer requests WITHOUT re-running the EL survey:
+             11. Baseline predictive comparison   (crack-count / crack-area /
+                 EL-composite  ->  Power_Loss)  [Health_Score REMOVED — see note]
+             12. Composite Health-Score weight sensitivity  (Spearman rank
+                 stability under +/-5 pt weight perturbation)
+             13. Explicit separation of ASSOCIATION (Pearson/Spearman + p)
+                 vs PREDICTION (k-fold CV: R2, MAE)  [Health_Score REMOVED]
+             14. NEW — Baseline RANKING comparison (answers R1#6 / R2#5):
+                 does the Health Score's top-20-worst list actually identify
+                 more of the fleet's real highest-loss panels than simple,
+                 outcome-independent baselines (crack count alone; crack
+                 count + edge damage)?
+
+  ────────────────────────────────────────────────────────────────────────
+  WHY Health_Score WAS REMOVED FROM SECTIONS 11 & 13 (vs. the original
+  add-on script you shared):
+
+  Health_Score's Power Performance Index (PPI) is defined directly from
+  Power_Loss (PPI = (1 - Power_Loss/100) * 100). Evaluating Health_Score's
+  out-of-sample R² against Power_Loss is therefore NOT an independent
+  prediction problem — the target is partially embedded in the predictor
+  (target incorporation / circularity). Both IJIES reviewers flagged this
+  explicitly (Reviewer 1, comment 1; Reviewer 2, comment 3) and asked the
+  authors to either remove this experiment or redesign the Score to not
+  contain the outcome. This revised script takes the "remove" path (as
+  agreed), and replaces it with Section 14: a decision-oriented RANKING
+  comparison that does not suffer from this problem, because it only asks
+  "does the Score's ranking correctly prioritise the real worst panels?" —
+  not "can the Score's own power-loss-derived component predict power
+  loss?". This is exactly the distinction Reviewer 2 (comment 3) asked the
+  paper to make explicit.
+  ────────────────────────────────────────────────────────────────────────
+
+  Usage (Colab):  set INPUT_CSV / OUTPUT_DIR below (same paths as main script)
+                  then: Run All
+================================================================================
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+from datetime import datetime
+from scipy.stats import pearsonr, spearmanr
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, mean_absolute_error, mean_squared_error
+import warnings
+warnings.filterwarnings('ignore')
+
+RANDOM_STATE = 42   # fixed seed -> results are reproducible & citable
+
+# ── ► SAME PATHS AS THE MAIN SCRIPT ◄ ───────────────────────────────────────
+INPUT_CSV  = Path('/content/drive/MyDrive/PV ARRAY JST FARM/Dataset_el_204panels Seraphin.csv')
+OUTPUT_DIR = Path('/content/drive/MyDrive/PV ARRAY JST FARM/EL_Analysis_Output')
+# ─────────────────────────────────────────────────────────────────────────────
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PLOT_DIR = OUTPUT_DIR / 'plots'
+PLOT_DIR.mkdir(parents=True, exist_ok=True)
+TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+# Number of "worst" panels used throughout for maintenance-priority ranking
+# comparisons (matches Table 3's top-20-worst convention in the manuscript).
+TOP_N_WORST = 20
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 0. LOAD & REBUILD DERIVED COLUMNS (identical to main script)
+# ─────────────────────────────────────────────────────────────────────────────
+def load_and_prepare(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df['Actual_Power_pct'] = df['Actual_Power'] / df['Rated_Power'] * 100
+    df['Crack_Density']    = df['Num_Cracks'] / (156.0 * 156.0)
+    return df
+
+
+def compute_health_score(df: pd.DataFrame,
+                          w_ppi: float = 0.40,
+                          w_csi: float = 0.35,
+                          w_tri: float = 0.25,
+                          edge_penalty: float = 0.05) -> pd.Series:
+    """Reproduces the main script's Health Score with configurable weights
+    (weights need not sum to 1 here on purpose -- see Section 12)."""
+    ppi = 1.0 - (df['Power_Loss'] / 100.0)
+    csi = 1.0 - ((df['Crack_Area'] - df['Crack_Area'].min()) /
+                 (df['Crack_Area'].max() - df['Crack_Area'].min()))
+    tri = 1.0 - ((df['HotSpot_Area'] - df['HotSpot_Area'].min()) /
+                 (df['HotSpot_Area'].max() - df['HotSpot_Area'].min()))
+    hs = (w_ppi * ppi + w_csi * csi + w_tri * tri) * 100 - df['Edge_Damage'] * edge_penalty * 100
+    return hs.clip(0, 100)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. BASELINE PREDICTIVE COMPARISON  (Health_Score removed — see module note)
+# ─────────────────────────────────────────────────────────────────────────────
+def section11_baseline_comparison(df: pd.DataFrame) -> pd.DataFrame:
+    print("=" * 78)
+    print("  SECTION 11 — Baseline Predictive Comparison (Power_Loss as target)")
+    print("  NOTE: Composite_Health_Score is intentionally EXCLUDED here because")
+    print("  its Power Performance component is defined directly from Power_Loss")
+    print("  (target incorporation). See Section 14 for the Score's evaluation")
+    print("  as a ranking / maintenance-prioritisation tool instead.")
+    print("=" * 78)
+
+    y = df['Power_Loss'].values
+
+    feature_sets = {
+        'Crack_count_only': ['Num_Cracks'],
+        'Crack_area_only' : ['Crack_Area'],
+        'EL_composite'    : ['Num_Cracks', 'Crack_Area', 'HotSpot_Area', 'Edge_Damage'],
+        # 'Composite_Health_Score': ['Health_Score'],  # REMOVED — target incorporation, see note above
+    }
+
+    models = {
+        'LinearRegression': LinearRegression(),
+        'RandomForest'     : RandomForestRegressor(
+            n_estimators=300, max_depth=5, random_state=RANDOM_STATE),
+    }
+
+    rows = []
+    kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+    for feat_name, cols in feature_sets.items():
+        X = df[cols].values
+
+        # ── single 80/20 held-out split (reported as the "test" numbers) ────
+        X_tr, X_te, y_tr, y_te = train_test_split(
+            X, y, test_size=0.20, random_state=RANDOM_STATE)
+
+        for model_name, model in models.items():
+            model.fit(X_tr, y_tr)
+            y_pred = model.predict(X_te)
+
+            r2   = r2_score(y_te, y_pred)
+            mae  = mean_absolute_error(y_te, y_pred)
+            rmse = np.sqrt(mean_squared_error(y_te, y_pred))
+
+            # ── 5-fold CV (more robust given N=204; test fold ~41 samples) ──
+            cv_r2  = cross_val_score(model, X, y, cv=kf, scoring='r2')
+            cv_mae = -cross_val_score(model, X, y, cv=kf,
+                                       scoring='neg_mean_absolute_error')
+
+            rows.append({
+                'Feature_Set'   : feat_name,
+                'Model'         : model_name,
+                'HoldOut_R2'    : round(r2, 4),
+                'HoldOut_MAE'   : round(mae, 3),
+                'HoldOut_RMSE'  : round(rmse, 3),
+                'CV5_R2_mean'   : round(cv_r2.mean(), 4),
+                'CV5_R2_std'    : round(cv_r2.std(), 4),
+                'CV5_MAE_mean'  : round(cv_mae.mean(), 3),
+            })
+
+    result = pd.DataFrame(rows)
+    print("\n" + result.to_string(index=False))
+
+    out_csv = OUTPUT_DIR / f'baseline_comparison_{TIMESTAMP}.csv'
+    result.to_csv(out_csv, index=False)
+    print(f"\n  Saved -> {out_csv}\n")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. COMPOSITE HEALTH SCORE — WEIGHT SENSITIVITY / RANKING STABILITY
+#     (unchanged — no target-leakage issue here: this only tests whether the
+#      Score's own internal ranking is stable to weight changes, it never
+#      compares the Score's output against Power_Loss as a prediction target)
+# ─────────────────────────────────────────────────────────────────────────────
+def section12_weight_sensitivity(df: pd.DataFrame) -> pd.DataFrame:
+    print("=" * 78)
+    print("  SECTION 12 — Health Score Weight Sensitivity (Spearman rank stability)")
+    print("=" * 78)
+
+    scenarios = {
+        'Nominal': (0.40, 0.35, 0.25),
+        'S1'     : (0.45, 0.30, 0.25),
+        'S2'     : (0.35, 0.40, 0.25),
+        'S3'     : (0.40, 0.30, 0.30),
+        'S4'     : (0.35, 0.35, 0.30),
+    }
+
+    nominal_hs   = compute_health_score(df, *scenarios['Nominal'])
+    nominal_rank = nominal_hs.rank(ascending=True)   # rank 1 = worst panel
+
+    rows = []
+    for name, (w1, w2, w3) in scenarios.items():
+        hs   = compute_health_score(df, w1, w2, w3)
+        rank = hs.rank(ascending=True)
+        rho, pval = spearmanr(nominal_rank, rank)
+
+        # Top-N-worst overlap: does the maintenance priority list actually change?
+        nominal_worst = set(df.loc[nominal_hs.nsmallest(TOP_N_WORST).index, 'ID_PV'])
+        scen_worst    = set(df.loc[hs.nsmallest(TOP_N_WORST).index, 'ID_PV'])
+        overlap_pct   = 100 * len(nominal_worst & scen_worst) / TOP_N_WORST
+
+        rows.append({
+            'Scenario'         : name,
+            'w_PPI'            : w1, 'w_CSI': w2, 'w_TRI': w3,
+            'Mean_HS'          : round(hs.mean(), 1),
+            'Spearman_rho_vs_Nominal': round(rho, 4),
+            'p_value'          : f'{pval:.2e}',
+            f'Top{TOP_N_WORST}_Worst_Overlap_%' : round(overlap_pct, 1),
+        })
+
+    result = pd.DataFrame(rows)
+    print("\n" + result.to_string(index=False))
+
+    verdict = "STABLE (all rho > 0.95)" if (result['Spearman_rho_vs_Nominal'] >= 0.95).all() \
+              else "NOT fully stable -- check low-rho scenarios before citing 'stable ranking'"
+    print(f"\n  Verdict: {verdict}")
+
+    out_csv = OUTPUT_DIR / f'weight_sensitivity_{TIMESTAMP}.csv'
+    result.to_csv(out_csv, index=False)
+    print(f"  Saved -> {out_csv}\n")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. ASSOCIATION (correlation) vs PREDICTION (out-of-sample) — SIDE BY SIDE
+#     (Health_Score and Crack_Density removed — see manuscript Section 2.2/2.3:
+#      Crack_Density is a constant linear rescaling of Num_Cracks, and
+#      Health_Score suffers the same target-incorporation issue as Section 11)
+# ─────────────────────────────────────────────────────────────────────────────
+def section13_association_vs_prediction(df: pd.DataFrame) -> pd.DataFrame:
+    print("=" * 78)
+    print("  SECTION 13 — Association vs Out-of-Sample Prediction")
+    print("  NOTE: Health_Score excluded (target incorporation, see Section 11 note).")
+    print("  Crack_Density excluded (constant linear rescaling of Num_Cracks; see")
+    print("  manuscript Section 2.2).")
+    print("=" * 78)
+
+    y = df['Power_Loss'].values
+    predictors = ['Num_Cracks', 'Edge_Damage', 'Crack_Area', 'HotSpot_Area']
+
+    kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+    rows = []
+    for col in predictors:
+        x = df[col].values
+
+        r_pear, p_pear = pearsonr(x, y)
+        r_spear, p_spear = spearmanr(x, y)
+
+        # simple univariate linear model, cross-validated (out-of-sample)
+        model = LinearRegression()
+        X = x.reshape(-1, 1)
+        cv_r2  = cross_val_score(model, X, y, cv=kf, scoring='r2')
+        cv_mae = -cross_val_score(model, X, y, cv=kf, scoring='neg_mean_absolute_error')
+
+        rows.append({
+            'Predictor'        : col,
+            'Pearson_r'        : round(r_pear, 4),
+            'Pearson_p'        : f'{p_pear:.2e}',
+            'Spearman_rho'     : round(r_spear, 4),
+            'Spearman_p'       : f'{p_spear:.2e}',
+            'CV5_R2_OutOfSample': round(cv_r2.mean(), 4),
+            'CV5_MAE_OutOfSample': round(cv_mae.mean(), 3),
+        })
+
+    result = pd.DataFrame(rows).sort_values('Pearson_r', key=abs, ascending=False)
+    print("\n" + result.to_string(index=False))
+    print("\n  NOTE: Pearson_r/Spearman_rho quantify empirical ASSOCIATION on the")
+    print("  full sample (in-sample). CV5_R2_OutOfSample quantifies genuine")
+    print("  PREDICTIVE performance on held-out folds -- these can diverge, and")
+    print("  a high |r| with a much lower out-of-sample R2 is itself a finding")
+    print("  worth reporting (over-fitting / non-linearity / small-N variance).\n")
+
+    out_csv = OUTPUT_DIR / f'association_vs_prediction_{TIMESTAMP}.csv'
+    result.to_csv(out_csv, index=False)
+    print(f"  Saved -> {out_csv}\n")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. NEW — BASELINE RANKING COMPARISON  (answers R1#6 / R2#5)
+#
+#     Question: does the Health Score's maintenance-priority ranking actually
+#     identify more of the fleet's real highest-loss panels than simple,
+#     transparent, outcome-independent baselines?
+#
+#     This is a DECISION/RANKING evaluation, not a regression-prediction
+#     evaluation, so it does NOT suffer from the Health_Score target-
+#     incorporation problem: we are not asking the Score to predict a
+#     Power_Loss value, only asking whether its ORDERING of panels agrees
+#     with the ordering implied by the ground-truth Power_Loss.
+# ─────────────────────────────────────────────────────────────────────────────
+def section14_baseline_ranking_comparison(df: pd.DataFrame) -> pd.DataFrame:
+    print("=" * 78)
+    print("  SECTION 14 — Baseline Ranking Comparison (answers R1#6 / R2#5)")
+    print("=" * 78)
+
+    n = len(df)
+    ground_truth_worst = set(
+        df.nlargest(TOP_N_WORST, 'Power_Loss')['ID_PV']
+    )  # the panels that ACTUALLY lost the most power
+
+    rankers = {
+        'Health_Score'              : df['Health_Score'],                     # lower = worse
+        'Crack_count_only'          : -df['Num_Cracks'],                      # higher count = worse -> negate
+        'Crack_count_plus_EdgeDamage': -(df['Num_Cracks'] + df['Edge_Damage'] * df['Num_Cracks'].max()),
+    }
+    # Crack_count_plus_EdgeDamage: simple transparent rule — rank primarily by
+    # crack count, with edge-damaged panels pushed to the priority list by
+    # adding a large constant (max crack count) when Edge_Damage == 1. This
+    # keeps the rule interpretable (no fitted weights) as reviewers requested
+    # ("simple baselines such as crack count alone and crack count plus edge
+    # damage").
+
+    rows = []
+    for name, score_series in rankers.items():
+        # nsmallest = the 20 "worst" panels under this rule (all rules are
+        # oriented so that smaller = worse, matching Health_Score's convention
+        # after the sign flips above)
+        predicted_worst = set(df.loc[score_series.nsmallest(TOP_N_WORST).index, 'ID_PV'])
+        overlap = predicted_worst & ground_truth_worst
+        overlap_pct = 100 * len(overlap) / TOP_N_WORST
+
+        # Precision@20 == overlap_pct/100 here since both lists have length 20;
+        # also report recall of total high-loss panels captured for clarity.
+        rows.append({
+            'Ranking_rule'                 : name,
+            f'Top{TOP_N_WORST}_overlap_with_ground_truth': len(overlap),
+            'Overlap_%'                    : round(overlap_pct, 1),
+            'Precision@20'                 : round(len(overlap) / TOP_N_WORST, 3),
+        })
+
+    result = pd.DataFrame(rows).sort_values('Overlap_%', ascending=False)
+    print("\n" + result.to_string(index=False))
+
+    best_rule = result.iloc[0]['Ranking_rule']
+    best_pct  = result.iloc[0]['Overlap_%']
+    print(f"\n  Best-performing rule: {best_rule} ({best_pct}% overlap with the "
+          f"{TOP_N_WORST} panels carrying the greatest actual power loss)")
+    print("  Use this sentence pattern for the manuscript placeholders:")
+    print(f"  \"...its top-{TOP_N_WORST} ranking captured {result.loc[result.Ranking_rule=='Health_Score','Overlap_%'].values[0]}% "
+          f"of the fleet's highest-loss panels, versus {result.loc[result.Ranking_rule=='Crack_count_only','Overlap_%'].values[0]}% "
+          f"for crack-count-only and {result.loc[result.Ranking_rule=='Crack_count_plus_EdgeDamage','Overlap_%'].values[0]}% "
+          f"for crack-count-plus-edge-damage.\"\n")
+
+    out_csv = OUTPUT_DIR / f'baseline_ranking_comparison_{TIMESTAMP}.csv'
+    result.to_csv(out_csv, index=False)
+    print(f"  Saved -> {out_csv}\n")
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIGURE: summarise all four add-on analyses in one PNG
+# ─────────────────────────────────────────────────────────────────────────────
+def make_addon_figure(baseline_df: pd.DataFrame,
+                       sensitivity_df: pd.DataFrame,
+                       assoc_df: pd.DataFrame,
+                       ranking_df: pd.DataFrame) -> None:
+    fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+    fig.suptitle('Add-on Validation: Baseline Comparison & Sensitivity Analysis (Revised)', fontsize=12)
+
+    # (a) CV R2 by feature set / model
+    piv = baseline_df.pivot(index='Feature_Set', columns='Model', values='CV5_R2_mean')
+    piv.plot(kind='bar', ax=axes[0, 0], edgecolor='white', alpha=0.88)
+    axes[0, 0].set_title('5-fold CV R² by Feature Set\n(Health_Score excluded — see note)')
+    axes[0, 0].set_ylabel('CV R² (out-of-sample)')
+    axes[0, 0].tick_params(axis='x', rotation=20)
+    axes[0, 0].axhline(0, color='black', linewidth=0.8)
+
+    # (b) Weight sensitivity: Spearman rho vs Nominal
+    bars = axes[0, 1].bar(sensitivity_df['Scenario'], sensitivity_df['Spearman_rho_vs_Nominal'],
+                           color='teal', edgecolor='white', alpha=0.85)
+    axes[0, 1].axhline(0.95, color='crimson', linestyle='--', label='0.95 stability threshold')
+    axes[0, 1].bar_label(bars, fmt='%.3f', padding=3, fontsize=8)
+    axes[0, 1].set_ylim(0, 1.05)
+    axes[0, 1].set_title('Health-Score Ranking Stability\n(Spearman ρ vs Nominal weights)')
+    axes[0, 1].set_ylabel('Spearman ρ')
+    axes[0, 1].legend(fontsize=8)
+
+    # (c) Association (|Pearson r|) vs out-of-sample R2
+    x = np.arange(len(assoc_df))
+    w = 0.38
+    axes[1, 0].bar(x - w/2, assoc_df['Pearson_r'].abs(), width=w,
+                   color='steelblue', alpha=0.85, label='|Pearson r| (association)')
+    axes[1, 0].bar(x + w/2, assoc_df['CV5_R2_OutOfSample'].clip(lower=0), width=w,
+                   color='darkorange', alpha=0.85, label='CV R² (out-of-sample prediction)')
+    axes[1, 0].set_xticks(x)
+    axes[1, 0].set_xticklabels(assoc_df['Predictor'], rotation=30, ha='right')
+    axes[1, 0].set_title('Association vs Out-of-Sample Predictive Power')
+    axes[1, 0].legend(fontsize=8)
+
+    # (d) NEW — baseline ranking comparison (R1#6 / R2#5)
+    bars2 = axes[1, 1].bar(ranking_df['Ranking_rule'], ranking_df['Overlap_%'],
+                            color=['#8e44ad', '#16a085', '#e67e22'], edgecolor='white', alpha=0.9)
+    axes[1, 1].bar_label(bars2, fmt='%.1f%%', padding=3, fontsize=9)
+    axes[1, 1].set_ylim(0, 100)
+    axes[1, 1].set_ylabel(f'% overlap with true top-{TOP_N_WORST} worst panels')
+    axes[1, 1].set_title(f'Maintenance-Priority Ranking:\nTop-{TOP_N_WORST} Overlap vs Ground Truth')
+    axes[1, 1].tick_params(axis='x', rotation=15)
+
+    plt.tight_layout()
+    fig.savefig(PLOT_DIR / f'08_addon_validation_REVISED_{TIMESTAMP}.png', dpi=130, bbox_inches='tight')
+    plt.show()
+    print(f"  Figure saved -> {PLOT_DIR / f'08_addon_validation_REVISED_{TIMESTAMP}.png'}\n")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+def main():
+    df = load_and_prepare(INPUT_CSV)
+    df['Health_Score'] = compute_health_score(df)   # nominal weights, for Sections 12 & 14
+
+    baseline_df    = section11_baseline_comparison(df)
+    sensitivity_df = section12_weight_sensitivity(df)
+    assoc_df       = section13_association_vs_prediction(df)
+    ranking_df     = section14_baseline_ranking_comparison(df)
+
+    make_addon_figure(baseline_df, sensitivity_df, assoc_df, ranking_df)
+
+    print("=" * 78)
+    print("  ADD-ON VALIDATION COMPLETE — 4 CSVs + 1 figure written to OUTPUT_DIR")
+    print("=" * 78)
+    return baseline_df, sensitivity_df, assoc_df, ranking_df
+
+
+if __name__ == "__main__":
+    baseline_df, sensitivity_df, assoc_df, ranking_df = main()
