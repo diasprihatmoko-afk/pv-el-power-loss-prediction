@@ -1,0 +1,677 @@
+"""
+==============================================================================
+  COMPREHENSIVE EL INSPECTION ANALYSIS - 204 PANELS SERAPHIM SRP-310-6MB
+  Configuration: 12 strings × 17 modules = 204 modules (63.24 kWp)
+
+  Analysis Objectives:
+  1. Exploratory Data Analysis (EDA)
+  2. Defect Classification & Distribution
+  3. Power Loss Correlation Analysis
+  4. String-Level Mismatch Calculation
+  5. Statistical Quality Assessment
+  6. Spatial Distribution Mapping
+  7. Predictive Maintenance Insights
+
+  Input  : Dataset_el_204panels Seraphin.csv
+  Output : Comprehensive analysis reports & visualizations
+==============================================================================
+"""
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+
+# Set plot style
+plt.style.use('seaborn-v0_8-whitegrid')
+plt.rcParams['figure.dpi'] = 100
+plt.rcParams['savefig.dpi'] = 120
+plt.rcParams['font.size'] = 10
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 0. CONFIGURATION & CONSTANTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+class SystemConfig:
+    """System Configuration Parameters"""
+    N_STRINGS = 12
+    N_MODULES_PER_STRING = 17
+    N_MODULES_TOTAL = 204
+    MODULE_RATED_POWER = 310.0  # Wp
+    DC_CAPACITY_KWP = 63.24
+    INVERTER_AC_CAPACITY = 60.0  # kW
+
+    # Severity level ordering
+    SEVERITY_ORDER = ['Good', 'Minor', 'Moderate', 'Severe', 'Critical', 'Catastrophic']
+
+    # Color palettes
+    SEVERITY_COLORS = {
+        'Good': '#27ae60',
+        'Minor': '#2ecc71',
+        'Moderate': '#f39c12',
+        'Severe': '#e67e22',
+        'Critical': '#e74c3c',
+        'Catastrophic': '#c0392b'
+    }
+
+cfg = SystemConfig()
+RUN_TIMESTAMP = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 1. DATA LOADING & VALIDATION
+# ═════════════════════════════════════════════════════════════════════════════
+
+def load_and_validate_data(file_path: str) -> pd.DataFrame:
+    """
+    Load EL inspection dataset and perform validation
+    """
+    print("="*80)
+    print("LOADING AND VALIDATING DATASET")
+    print("="*80)
+
+    # Load CSV
+    df = pd.read_csv(file_path)
+
+    print(f"\n✓ Dataset loaded successfully")
+    print(f"  Total records    : {len(df)}")
+    print(f"  Total columns    : {len(df.columns)}")
+    print(f"  Columns          : {list(df.columns)}")
+
+    # Validate module count
+    if len(df) != cfg.N_MODULES_TOTAL:
+        print(f"\n⚠ Warning: Expected {cfg.N_MODULES_TOTAL} modules, found {len(df)}")
+    else:
+        print(f"\n✓ Module count matches configuration (204 modules)")
+
+    # Check for missing values
+    missing = df.isnull().sum()
+    if missing.sum() > 0:
+        print(f"\n⚠ Missing values detected:")
+        print(missing[missing > 0])
+    else:
+        print(f"\n✓ No missing values")
+
+    # Validate data types
+    print(f"\n✓ Data types:")
+    print(df.dtypes)
+
+    # Convert inspection date to datetime
+    df['Inspection_Date'] = pd.to_datetime(df['Inspection_Date'], format='%m/%d/%Y', errors='coerce')
+
+    # Validate severity levels
+    unique_severity = df['Severity_Level'].unique()
+    print(f"\n✓ Unique severity levels: {list(unique_severity)}")
+
+    # Validate power ratings
+    if df['Rated_Power'].nunique() > 1:
+        print(f"\n⚠ Multiple rated power values found: {df['Rated_Power'].unique()}")
+    else:
+        print(f"\n✓ Rated power consistent: {df['Rated_Power'].iloc[0]} Wp")
+
+    return df
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 2. DESCRIPTIVE STATISTICS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def calculate_descriptive_statistics(df: pd.DataFrame) -> dict:
+    """
+    Calculate comprehensive descriptive statistics
+    """
+    print("\n" + "="*80)
+    print("DESCRIPTIVE STATISTICS")
+    print("="*80)
+
+    stats = {
+        'total_modules': len(df),
+        'total_rated_capacity_w': df['Rated_Power'].sum(),
+        'total_actual_capacity_w': df['Actual_Power'].sum(),
+        'avg_power_loss_pct': df['Power_Loss'].mean(),
+        'median_power_loss_pct': df['Power_Loss'].median(),
+        'std_power_loss_pct': df['Power_Loss'].std(),
+        'max_power_loss_pct': df['Power_Loss'].max(),
+        'min_power_loss_pct': df['Power_Loss'].min(),
+        'avg_crack_area_pct': df['Crack_Area'].mean(),
+        'avg_hotspot_area_pct': df['HotSpot_Area'].mean(),
+        'total_cracks': df['Num_Cracks'].sum(),
+        'avg_num_cracks': df['Num_Cracks'].mean(),
+        'modules_with_edge_damage': df['Edge_Damage'].sum(),
+        'pct_edge_damage': (df['Edge_Damage'].sum() / len(df)) * 100,
+    }
+
+    # Print statistics
+    print(f"\n📊 CAPACITY STATISTICS:")
+    print(f"  Total Rated Capacity    : {stats['total_rated_capacity_w']:,.0f} W ({stats['total_rated_capacity_w']/1000:.2f} kWp)")
+    print(f"  Total Actual Capacity   : {stats['total_actual_capacity_w']:,.0f} W ({stats['total_actual_capacity_w']/1000:.2f} kWp)")
+    print(f"  Capacity Loss           : {stats['total_rated_capacity_w'] - stats['total_actual_capacity_w']:,.0f} W")
+    print(f"  Capacity Retention      : {(stats['total_actual_capacity_w']/stats['total_rated_capacity_w'])*100:.2f}%")
+
+    print(f"\n📊 POWER LOSS STATISTICS:")
+    print(f"  Average Power Loss      : {stats['avg_power_loss_pct']:.2f}%")
+    print(f"  Median Power Loss       : {stats['median_power_loss_pct']:.2f}%")
+    print(f"  Std Dev Power Loss      : {stats['std_power_loss_pct']:.2f}%")
+    print(f"  Max Power Loss          : {stats['max_power_loss_pct']:.2f}%")
+    print(f"  Min Power Loss          : {stats['min_power_loss_pct']:.2f}%")
+
+    print(f"\n📊 DEFECT STATISTICS:")
+    print(f"  Average Crack Area      : {stats['avg_crack_area_pct']:.2f}%")
+    print(f"  Average HotSpot Area    : {stats['avg_hotspot_area_pct']:.2f}%")
+    print(f"  Total Number of Cracks  : {stats['total_cracks']:,}")
+    print(f"  Average Cracks/Module   : {stats['avg_num_cracks']:.0f}")
+    print(f"  Modules with Edge Damage: {stats['modules_with_edge_damage']} ({stats['pct_edge_damage']:.1f}%)")
+
+    return stats
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 3. SEVERITY DISTRIBUTION ANALYSIS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def analyze_severity_distribution(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Analyze distribution of modules by severity level
+    """
+    print("\n" + "="*80)
+    print("SEVERITY LEVEL DISTRIBUTION")
+    print("="*80)
+
+    severity_dist = df['Severity_Level'].value_counts().reindex(cfg.SEVERITY_ORDER).fillna(0).astype(int)
+    severity_pct = (severity_dist / len(df)) * 100
+
+    severity_summary = pd.DataFrame({
+        'Count': severity_dist,
+        'Percentage': severity_pct,
+        'Total_Rated_Power_W': [df[df['Severity_Level'] == level]['Rated_Power'].sum()
+                                 for level in severity_dist.index],
+        'Total_Actual_Power_W': [df[df['Severity_Level'] == level]['Actual_Power'].sum()
+                                  for level in severity_dist.index],
+        'Avg_Power_Loss_Pct': [df[df['Severity_Level'] == level]['Power_Loss'].mean()
+                               for level in severity_dist.index],
+        'Avg_Crack_Area_Pct': [df[df['Severity_Level'] == level]['Crack_Area'].mean()
+                               for level in severity_dist.index],
+    })
+
+    print(f"\n{'Severity Level':<15} {'Count':>8} {'%':>8} {'Rated (W)':>12} {'Actual (W)':>12} {'Avg Loss %':>10}")
+    print("-"*80)
+    for idx, row in severity_summary.iterrows():
+        print(f"{idx:<15} {int(row['Count']):>8} {row['Percentage']:>7.1f}% "
+              f"{row['Total_Rated_Power_W']:>12,.0f} {row['Total_Actual_Power_W']:>12,.0f} "
+              f"{row['Avg_Power_Loss_Pct']:>9.2f}")
+
+    # Calculate quality metrics
+    good_modules = severity_summary.loc[['Good', 'Minor'], 'Count'].sum()
+    degraded_modules = severity_summary.loc[['Moderate', 'Severe', 'Critical', 'Catastrophic'], 'Count'].sum()
+
+    print(f"\n✓ Quality Metrics:")
+    print(f"  Good/Minor Modules      : {good_modules} ({(good_modules/len(df))*100:.1f}%)")
+    print(f"  Degraded Modules        : {degraded_modules} ({(degraded_modules/len(df))*100:.1f}%)")
+
+    return severity_summary
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 4. CRACK TYPE ANALYSIS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def analyze_crack_types(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Analyze distribution and impact of different crack types
+    """
+    print("\n" + "="*80)
+    print("CRACK TYPE ANALYSIS")
+    print("="*80)
+
+    crack_type_stats = df.groupby('Crack_Type').agg(
+        Count=('ID_PV', 'count'),
+        Avg_Power_Loss=('Power_Loss', 'mean'),
+        Avg_Crack_Area=('Crack_Area', 'mean'),
+        Avg_HotSpot_Area=('HotSpot_Area', 'mean'),
+        Total_Actual_Power=('Actual_Power', 'sum'),
+        Max_Severity=('Severity_Level', lambda x: max(x, key=lambda s: cfg.SEVERITY_ORDER.index(s) if s in cfg.SEVERITY_ORDER else -1))
+    ).sort_values('Count', ascending=False)
+
+    print(f"\nTop 10 Most Common Crack Types:")
+    print(f"{'Crack Type':<50} {'Count':>8} {'Avg Loss %':>12} {'Avg Crack %':>12}")
+    print("-"*85)
+    for idx, row in crack_type_stats.head(10).iterrows():
+        print(f"{idx:<50} {int(row['Count']):>8} {row['Avg_Power_Loss']:>11.2f}% {row['Avg_Crack_Area']:>11.2f}%")
+
+    # Identify most critical crack types
+    critical_types = df[df['Severity_Level'].isin(['Critical', 'Catastrophic'])]['Crack_Type'].value_counts()
+    print(f"\n✓ Most Critical Crack Types (Critical/Catastrophic):")
+    for crack_type, count in critical_types.head(5).items():
+        print(f"  • {crack_type}: {count} modules")
+
+    return crack_type_stats
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 5. STRING MAPPING & MISMATCH ANALYSIS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def analyze_string_configuration(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Map modules to string configuration and calculate mismatch losses
+    """
+    print("\n" + "="*80)
+    print("STRING CONFIGURATION & MISMATCH ANALYSIS")
+    print("="*80)
+
+    # Map modules to strings (sequential mapping)
+    df_mapped = df.copy()
+    df_mapped['String_ID'] = (df_mapped.index // cfg.N_MODULES_PER_STRING) + 1
+    df_mapped['Position_in_String'] = (df_mapped.index % cfg.N_MODULES_PER_STRING) + 1
+
+    # Calculate string-level parameters
+    string_analysis = df_mapped.groupby('String_ID').agg(
+        N_Modules=('ID_PV', 'count'),
+        Total_Rated_Power=('Rated_Power', 'sum'),
+        Total_Actual_Power_Sum=('Actual_Power', 'sum'),
+        Min_Imp=('Imp_A', 'min'),
+        Max_Imp=('Imp_A', 'max'),
+        Avg_Imp=('Imp_A', 'mean'),
+        Total_Vmp=('Vmp_V', 'sum'),
+        Avg_Power_Loss=('Power_Loss', 'mean'),
+        Worst_Severity=('Severity_Level', lambda x: max(x, key=lambda s: cfg.SEVERITY_ORDER.index(s) if s in cfg.SEVERITY_ORDER else -1)),
+        Total_Cracks=('Num_Cracks', 'sum'),
+        Max_Crack_Area=('Crack_Area', 'max'),
+    ).reset_index()
+
+    # Calculate actual string power (limited by lowest current module in series)
+    # P_string = V_string_total × I_min
+    string_analysis['String_Actual_Power_Calculated'] = (
+        string_analysis['Total_Vmp'] * string_analysis['Min_Imp']
+    )
+
+    # Calculate mismatch loss
+    string_analysis['Mismatch_Loss_W'] = (
+        string_analysis['Total_Actual_Power_Sum'] - string_analysis['String_Actual_Power_Calculated']
+    )
+    string_analysis['Mismatch_Loss_Pct'] = (
+        string_analysis['Mismatch_Loss_W'] / string_analysis['Total_Actual_Power_Sum'] * 100
+    )
+
+    print(f"\n{'String':>6} {'Modules':>8} {'Rated (W)':>12} {'Actual Sum (W)':>15} {'String Calc (W)':>16} {'Mismatch %':>10} {'Worst Sev':>12}")
+    print("-"*95)
+    for _, row in string_analysis.iterrows():
+        print(f"{int(row['String_ID']):>6} {int(row['N_Modules']):>8} "
+              f"{row['Total_Rated_Power']:>12,.0f} {row['Total_Actual_Power_Sum']:>15,.1f} "
+              f"{row['String_Actual_Power_Calculated']:>16,.1f} {row['Mismatch_Loss_Pct']:>9.2f}% "
+              f"{row['Worst_Severity']:>12}")
+
+    # Summary statistics
+    total_mismatch = string_analysis['Mismatch_Loss_W'].sum()
+    avg_mismatch_pct = string_analysis['Mismatch_Loss_Pct'].mean()
+
+    print(f"\n✓ String Mismatch Summary:")
+    print(f"  Total Mismatch Loss       : {total_mismatch:,.1f} W ({total_mismatch/1000:.2f} kW)")
+    print(f"  Average Mismatch per String: {avg_mismatch_pct:.2f}%")
+    print(f"  Worst String (Mismatch)   : String #{string_analysis.loc[string_analysis['Mismatch_Loss_Pct'].idxmax(), 'String_ID']:.0f} "
+          f"({string_analysis['Mismatch_Loss_Pct'].max():.2f}%)")
+
+    return string_analysis, df_mapped
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 6. CORRELATION ANALYSIS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def analyze_correlations(df: pd.DataFrame):
+    """
+    Analyze correlations between defect parameters and power loss
+    """
+    print("\n" + "="*80)
+    print("CORRELATION ANALYSIS")
+    print("="*80)
+
+    # Select numerical columns for correlation
+    corr_cols = ['Power_Loss', 'Crack_Area', 'HotSpot_Area', 'Num_Cracks',
+                 'Actual_Power', 'Vmp_V', 'Imp_A', 'Voc_V', 'Isc_A']
+    corr_matrix = df[corr_cols].corr()
+
+    print(f"\nCorrelation with Power Loss:")
+    print(f"{'Parameter':<20} {'Correlation':>12}")
+    print("-"*35)
+    for col in corr_cols:
+        if col != 'Power_Loss':
+            corr_val = corr_matrix.loc['Power_Loss', col]
+            print(f"{col:<20} {corr_val:>12.4f}")
+
+    # Identify strong correlations
+    strong_corr = corr_matrix['Power_Loss'].abs().sort_values(ascending=False)
+    print(f"\n✓ Strongest Correlations with Power Loss (|r| > 0.5):")
+    for param, corr in strong_corr.items():
+        if param != 'Power_Loss' and corr > 0.5:
+            strength = "Very Strong" if corr > 0.7 else "Strong"
+            print(f"  • {param}: r = {corr:.4f} ({strength})")
+
+    return corr_matrix
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 7. VISUALIZATION FUNCTIONS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def create_visualizations(df: pd.DataFrame, severity_summary: pd.DataFrame,
+                         string_analysis: pd.DataFrame, df_mapped: pd.DataFrame,
+                         output_dir: Path):
+    """
+    Create comprehensive visualizations
+    """
+    print("\n" + "="*80)
+    print("GENERATING VISUALIZATIONS")
+    print("="*80)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Figure 1: Severity Distribution
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 1a. Severity pie chart
+    colors = [cfg.SEVERITY_COLORS.get(level, '#95a5a6') for level in severity_summary.index]
+    axes[0, 0].pie(severity_summary['Count'], labels=severity_summary.index,
+                   autopct='%1.1f%%', colors=colors, startangle=90,
+                   wedgeprops={'edgecolor': 'white', 'linewidth': 2})
+    axes[0, 0].set_title('Module Distribution by Severity Level', fontweight='bold')
+
+    # 1b. Severity bar chart
+    severity_summary['Count'].plot(kind='bar', ax=axes[0, 1],
+                                    color=[cfg.SEVERITY_COLORS.get(l, '#95a5a6')
+                                          for l in severity_summary.index],
+                                    edgecolor='black')
+    axes[0, 1].set_xlabel('Severity Level')
+    axes[0, 1].set_ylabel('Number of Modules')
+    axes[0, 1].set_title('Module Count by Severity', fontweight='bold')
+    axes[0, 1].tick_params(axis='x', rotation=45)
+
+    # 1c. Power loss by severity
+    severity_summary['Avg_Power_Loss_Pct'].plot(kind='bar', ax=axes[1, 0],
+                                                 color=[cfg.SEVERITY_COLORS.get(l, '#95a5a6')
+                                                       for l in severity_summary.index],
+                                                 edgecolor='black')
+    axes[1, 0].set_xlabel('Severity Level')
+    axes[1, 0].set_ylabel('Average Power Loss (%)')
+    axes[1, 0].set_title('Average Power Loss by Severity', fontweight='bold')
+    axes[1, 0].tick_params(axis='x', rotation=45)
+
+    # 1d. Crack area vs HotSpot area scatter
+    scatter = axes[1, 1].scatter(df['Crack_Area'], df['HotSpot_Area'],
+                                  c=df['Severity_Level'].map(cfg.SEVERITY_COLORS),
+                                  alpha=0.6, edgecolors='black', s=50)
+    axes[1, 1].set_xlabel('Crack Area (%)')
+    axes[1, 1].set_ylabel('HotSpot Area (%)')
+    axes[1, 1].set_title('Crack Area vs HotSpot Area', fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / f'01_severity_distribution_{RUN_TIMESTAMP}.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f"  ✓ Saved: 01_severity_distribution_{RUN_TIMESTAMP}.png")
+
+    # Figure 2: Power Loss Distribution
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 2a. Histogram of power loss
+    axes[0, 0].hist(df['Power_Loss'], bins=30, color='#3498db', edgecolor='black', alpha=0.7)
+    axes[0, 0].axvline(df['Power_Loss'].mean(), color='red', linestyle='--',
+                       linewidth=2, label=f'Mean = {df["Power_Loss"].mean():.2f}%')
+    axes[0, 0].set_xlabel('Power Loss (%)')
+    axes[0, 0].set_ylabel('Number of Modules')
+    axes[0, 0].set_title('Distribution of Power Loss', fontweight='bold')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # 2b. Box plot by severity
+    df.boxplot(column='Power_Loss', by='Severity_Level', ax=axes[0, 1],
+               patch_artist=True, boxprops=dict(facecolor='#3498db'))
+    axes[0, 1].set_xlabel('Severity Level')
+    axes[0, 1].set_ylabel('Power Loss (%)')
+    axes[0, 1].set_title('')
+    axes[0, 1].tick_params(axis='x', rotation=45)
+    plt.sca(axes[0, 1])
+    plt.title('Power Loss Distribution by Severity', fontweight='bold', y=1.05)
+
+    # 2c. Actual Power vs Rated Power
+    axes[1, 0].scatter(df['Rated_Power'], df['Actual_Power'],
+                       c=df['Power_Loss'], cmap='RdYlGn_r', alpha=0.6,
+                       edgecolors='black', s=50)
+    axes[1, 0].plot([0, 350], [0, 350], 'r--', linewidth=2, label='Ideal (100%)')
+    axes[1, 0].set_xlabel('Rated Power (W)')
+    axes[1, 0].set_ylabel('Actual Power (W)')
+    axes[1, 0].set_title('Actual vs Rated Power', fontweight='bold')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # 2d. Cumulative distribution
+    sorted_loss = np.sort(df['Power_Loss'])
+    cum_pct = np.arange(1, len(sorted_loss) + 1) / len(sorted_loss) * 100
+    axes[1, 1].plot(sorted_loss, cum_pct, linewidth=2, color='#27ae60')
+    axes[1, 1].axvline(df['Power_Loss'].median(), color='red', linestyle='--',
+                       label=f'Median = {df["Power_Loss"].median():.2f}%')
+    axes[1, 1].set_xlabel('Power Loss (%)')
+    axes[1, 1].set_ylabel('Cumulative Percentage (%)')
+    axes[1, 1].set_title('Cumulative Distribution of Power Loss', fontweight='bold')
+    axes[1, 1].legend()
+    axes[1, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / f'02_power_loss_analysis_{RUN_TIMESTAMP}.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f"  ✓ Saved: 02_power_loss_analysis_{RUN_TIMESTAMP}.png")
+
+    # Figure 3: String Analysis
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 3a. String mismatch loss
+    axes[0, 0].bar(string_analysis['String_ID'], string_analysis['Mismatch_Loss_Pct'],
+                   color='#e74c3c', edgecolor='black', alpha=0.7)
+    axes[0, 0].axhline(string_analysis['Mismatch_Loss_Pct'].mean(), color='red',
+                       linestyle='--', linewidth=2,
+                       label=f'Avg = {string_analysis["Mismatch_Loss_Pct"].mean():.2f}%')
+    axes[0, 0].set_xlabel('String ID')
+    axes[0, 0].set_ylabel('Mismatch Loss (%)')
+    axes[0, 0].set_title('String-Level Mismatch Loss', fontweight='bold')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # 3b. String actual power
+    axes[0, 1].bar(string_analysis['String_ID'], string_analysis['String_Actual_Power_Calculated'],
+                   color='#3498db', edgecolor='black', alpha=0.7)
+    axes[0, 1].axhline(string_analysis['String_Actual_Power_Calculated'].mean(),
+                       color='red', linestyle='--', linewidth=2,
+                       label=f'Avg = {string_analysis["String_Actual_Power_Calculated"].mean():.1f} W')
+    axes[0, 1].set_xlabel('String ID')
+    axes[0, 1].set_ylabel('String Power (W)')
+    axes[0, 1].set_title('Calculated String Power (Vmp × Imin)', fontweight='bold')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # 3c. Heatmap of module power by string
+    pivot_power = df_mapped.pivot(index='String_ID', columns='Position_in_String',
+                                   values='Actual_Power')
+    im = axes[1, 0].imshow(pivot_power.values, cmap='RdYlGn', aspect='auto')
+    axes[1, 0].set_xlabel('Position in String')
+    axes[1, 0].set_ylabel('String ID')
+    axes[1, 0].set_title('Module Actual Power Heatmap (W)', fontweight='bold')
+    plt.colorbar(im, ax=axes[1, 0], label='Power (W)')
+
+    # 3d. Severity distribution by string
+    severity_by_string = df_mapped.groupby(['String_ID', 'Severity_Level']).size().unstack(fill_value=0)
+    severity_by_string.plot(kind='bar', stacked=True, ax=axes[1, 1],
+                            color=[cfg.SEVERITY_COLORS.get(l, '#95a5a6')
+                                  for l in severity_by_string.columns])
+    axes[1, 1].set_xlabel('String ID')
+    axes[1, 1].set_ylabel('Number of Modules')
+    axes[1, 1].set_title('Severity Distribution by String', fontweight='bold')
+    axes[1, 1].legend(title='Severity', bbox_to_anchor=(1.05, 1), loc='upper left')
+    axes[1, 1].tick_params(axis='x', rotation=0)
+
+    plt.tight_layout()
+    plt.savefig(output_dir / f'03_string_analysis_{RUN_TIMESTAMP}.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f"  ✓ Saved: 03_string_analysis_{RUN_TIMESTAMP}.png")
+
+    # Figure 4: Defect Characteristics
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # 4a. Crack area distribution
+    axes[0, 0].hist(df['Crack_Area'], bins=30, color='#e67e22', edgecolor='black', alpha=0.7)
+    axes[0, 0].axvline(df['Crack_Area'].mean(), color='red', linestyle='--',
+                       linewidth=2, label=f'Mean = {df["Crack_Area"].mean():.2f}%')
+    axes[0, 0].set_xlabel('Crack Area (%)')
+    axes[0, 0].set_ylabel('Number of Modules')
+    axes[0, 0].set_title('Distribution of Crack Area', fontweight='bold')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # 4b. Number of cracks distribution
+    axes[0, 1].hist(df['Num_Cracks'], bins=30, color='#9b59b6', edgecolor='black', alpha=0.7)
+    axes[0, 1].axvline(df['Num_Cracks'].mean(), color='red', linestyle='--',
+                       linewidth=2, label=f'Mean = {df["Num_Cracks"].mean():.0f}')
+    axes[0, 1].set_xlabel('Number of Cracks')
+    axes[0, 1].set_ylabel('Number of Modules')
+    axes[0, 1].set_title('Distribution of Number of Cracks', fontweight='bold')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # 4c. Power loss vs Number of cracks
+    axes[1, 0].scatter(df['Num_Cracks'], df['Power_Loss'],
+                       c=df['Crack_Area'], cmap='Reds', alpha=0.6,
+                       edgecolors='black', s=50)
+    axes[1, 0].set_xlabel('Number of Cracks')
+    axes[1, 0].set_ylabel('Power Loss (%)')
+    axes[1, 0].set_title('Power Loss vs Number of Cracks', fontweight='bold')
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # 4d. Edge damage impact
+    edge_damage_stats = df.groupby('Edge_Damage').agg(
+        Count=('ID_PV', 'count'),
+        Avg_Power_Loss=('Power_Loss', 'mean'),
+        Avg_Crack_Area=('Crack_Area', 'mean')
+    )
+    x_pos = [0, 1]
+    labels = ['No Edge Damage', 'Edge Damage']
+    axes[1, 1].bar(x_pos, edge_damage_stats['Avg_Power_Loss'],
+                   color=['#3498db', '#e74c3c'], edgecolor='black', alpha=0.7)
+    axes[1, 1].set_xticks(x_pos)
+    axes[1, 1].set_xticklabels(labels)
+    axes[1, 1].set_ylabel('Average Power Loss (%)')
+    axes[1, 1].set_title('Impact of Edge Damage on Power Loss', fontweight='bold')
+    axes[1, 1].grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    plt.savefig(output_dir / f'04_defect_characteristics_{RUN_TIMESTAMP}.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print(f"  ✓ Saved: 04_defect_characteristics_{RUN_TIMESTAMP}.png")
+
+    print(f"\n📁 All visualizations saved to: {output_dir}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 8. EXPORT RESULTS
+# ═════════════════════════════════════════════════════════════════════════════
+
+def export_results(df: pd.DataFrame, severity_summary: pd.DataFrame,
+                   string_analysis: pd.DataFrame, df_mapped: pd.DataFrame,
+                   stats: dict, output_dir: Path):
+    """
+    Export analysis results to CSV files
+    """
+    print("\n" + "="*80)
+    print("EXPORTING RESULTS")
+    print("="*80)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Export detailed module data
+    df.to_csv(output_dir / f'module_detailed_data_{RUN_TIMESTAMP}.csv', index=False)
+    print(f"  ✓ Module detailed data: module_detailed_data_{RUN_TIMESTAMP}.csv")
+
+    # Export string-mapped data
+    df_mapped.to_csv(output_dir / f'modules_with_string_mapping_{RUN_TIMESTAMP}.csv', index=False)
+    print(f"  ✓ String-mapped data: modules_with_string_mapping_{RUN_TIMESTAMP}.csv")
+
+    # Export severity summary
+    severity_summary.to_csv(output_dir / f'severity_summary_{RUN_TIMESTAMP}.csv')
+    print(f"  ✓ Severity summary: severity_summary_{RUN_TIMESTAMP}.csv")
+
+    # Export string analysis
+    string_analysis.to_csv(output_dir / f'string_analysis_{RUN_TIMESTAMP}.csv', index=False)
+    print(f"  ✓ String analysis: string_analysis_{RUN_TIMESTAMP}.csv")
+
+    # Export statistics summary
+    stats_df = pd.DataFrame([stats])
+    stats_df.to_csv(output_dir / f'statistics_summary_{RUN_TIMESTAMP}.csv', index=False)
+    print(f"  ✓ Statistics summary: statistics_summary_{RUN_TIMESTAMP}.csv")
+
+    print(f"\n📁 All files exported to: {output_dir}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 9. MAIN EXECUTION
+# ═════════════════════════════════════════════════════════════════════════════
+
+def main():
+    """
+    Main execution function
+    """
+    print("\n" + "="*80)
+    print("COMPREHENSIVE EL INSPECTION ANALYSIS - 204 PANELS")
+    print("Seraphim SRP-310-6MB | 12 Strings × 17 Modules | 63.24 kWp")
+    print("="*80)
+    print(f"\nRun Timestamp: {RUN_TIMESTAMP}\n")
+
+    # Configuration
+    input_file = '/content/drive/MyDrive/PV ARRAY JST FARM/Dataset_el_204panels Seraphin.csv'
+    output_dir = Path('/content/drive/MyDrive/PV ARRAY JST FARM/EL_Analysis_204Panels_Output')
+
+    # Step 1: Load and validate data
+    df = load_and_validate_data(input_file)
+
+    # Step 2: Calculate descriptive statistics
+    stats = calculate_descriptive_statistics(df)
+
+    # Step 3: Analyze severity distribution
+    severity_summary = analyze_severity_distribution(df)
+
+    # Step 4: Analyze crack types
+    crack_type_stats = analyze_crack_types(df)
+
+    # Step 5: Analyze string configuration
+    string_analysis, df_mapped = analyze_string_configuration(df)
+
+    # Step 6: Correlation analysis
+    corr_matrix = analyze_correlations(df)
+
+    # Step 7: Create visualizations
+    create_visualizations(df, severity_summary, string_analysis, df_mapped, output_dir)
+
+    # Step 8: Export results
+    export_results(df, severity_summary, string_analysis, df_mapped, stats, output_dir)
+
+    # Final summary
+    print("\n" + "="*80)
+    print("ANALYSIS COMPLETE")
+    print("="*80)
+    print(f"\n📊 KEY FINDINGS:")
+    print(f"  • Total Modules Analyzed     : {len(df)}")
+    print(f"  • Total Rated Capacity       : {df['Rated_Power'].sum()/1000:.2f} kWp")
+    print(f"  • Total Actual Capacity      : {df['Actual_Power'].sum()/1000:.2f} kWp")
+    print(f"  • Average Power Loss         : {df['Power_Loss'].mean():.2f}%")
+    print(f"  • Capacity Retention         : {(df['Actual_Power'].sum()/df['Rated_Power'].sum())*100:.2f}%")
+    print(f"  • Modules in Good Condition  : {len(df[df['Severity_Level'].isin(['Good', 'Minor'])])} "
+          f"({(len(df[df['Severity_Level'].isin(['Good', 'Minor'])])/len(df))*100:.1f}%)")
+    print(f"  • Degraded Modules           : {len(df[~df['Severity_Level'].isin(['Good', 'Minor'])])} "
+          f"({(len(df[~df['Severity_Level'].isin(['Good', 'Minor'])])/len(df))*100:.1f}%)")
+    print(f"  • Total Mismatch Loss        : {string_analysis['Mismatch_Loss_W'].sum()/1000:.2f} kW")
+    print(f"\n📁 Output Directory: {output_dir}")
+    print("="*80 + "\n")
+
+
+if __name__ == "__main__":
+    main()
